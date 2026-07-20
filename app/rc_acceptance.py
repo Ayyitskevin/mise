@@ -203,8 +203,8 @@ def check_app_store_readiness_surface(root: Path) -> dict[str, str]:
     """Embed App Store auditor summary without equating eng READY to Connect ship.
 
     Hard product defects from the auditor (status=fail) fail this RC check.
-    Blocked items (owner decisions, device QA) are summarized but do not fail
-    eng READY — STORE SHIP remains do-not-ship independently.
+    Blocked items remain visibly blocked; engineering RC and STORE SHIP remain
+    separate aggregate decisions.
     """
     try:
         from app import app_store_readiness
@@ -237,8 +237,9 @@ def check_app_store_readiness_surface(root: Path) -> dict[str, str]:
         return _check(
             "app_store_readiness",
             "App Store readiness auditor",
-            "pass",
-            f"{detail}; blocked (not eng-fail): {keys}",
+            "blocked",
+            f"{detail}; blocked evidence: {keys}",
+            fix="Resolve the named evidence/owner gates before claiming App Store readiness.",
         )
     return _check(
         "app_store_readiness",

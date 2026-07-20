@@ -26,9 +26,9 @@ def main() -> int:
         if args.json
         else app_store_readiness.format_text(report)
     )
-    # Exit 0 only when the audit has no hard fails. App Store ship status is
-    # always printed separately and remains do-not-ship until Kevin decides
-    # #179/#180/#185 — eng clean ≠ Connect approval.
+    # Exit 0 only when every applicable check passes. Blocked evidence is not
+    # a successful release gate; App Store ship remains a separate human
+    # decision even after this local inventory becomes clean.
     return 0 if report["ready"] else 1
 
 

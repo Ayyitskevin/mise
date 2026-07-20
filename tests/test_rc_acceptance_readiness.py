@@ -149,3 +149,31 @@ def test_required_suite_blocked_status_prevents_ready():
     product_ready = counts["fail"] == 0 and required_ok
     assert product_ready is False
     assert counts["fail"] == 0  # pure blocked without fail still not ready
+
+
+def test_app_store_surface_preserves_blocked_status(monkeypatch, tmp_path):
+    from app import app_store_readiness
+
+    monkeypatch.setattr(
+        app_store_readiness,
+        "build_report",
+        lambda **_kwargs: {
+            "ready": False,
+            "verdict": "AUDIT_BLOCKED",
+            "passes": 2,
+            "failures": 0,
+            "blocked": 1,
+            "app_store_ship": "do-not-ship",
+            "checks": [
+                {
+                    "key": "privacy_labels",
+                    "status": "blocked",
+                }
+            ],
+        },
+    )
+
+    check = rc_acceptance.check_app_store_readiness_surface(tmp_path)
+
+    assert check["status"] == "blocked"
+    assert "privacy_labels" in check["detail"]

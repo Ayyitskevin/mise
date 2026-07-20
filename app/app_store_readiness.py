@@ -12,10 +12,13 @@ do-not-ship; this auditor does not invent privacy labels or IAP strategy.
 
 from __future__ import annotations
 
+import ast
 import json
+import plistlib
 import re
 from pathlib import Path
 from typing import Any
+from xml.parsers.expat import ExpatError
 
 STATUSES = ("pass", "fail", "blocked", "not_applicable")
 
@@ -141,33 +144,69 @@ def _concat_sources(paths: list[Path], *, limit: int = 200) -> tuple[str, list[s
 
 
 def parse_privacy_manifest(text: str) -> dict[str, Any]:
-    """Best-effort parse of PrivacyInfo.xcprivacy (plist XML as text)."""
-    collected = re.findall(
-        r"<key>NSPrivacyCollectedDataType</key>\s*<string>([^<]+)</string>",
-        text,
-    )
-    api_types = re.findall(
-        r"<key>NSPrivacyAccessedAPIType</key>\s*<string>([^<]+)</string>",
-        text,
-    )
-    reasons = re.findall(
-        r"<string>([A-Z0-9]{4}\.\d)</string>",
-        text,
-    )
-    tracking = (
-        "true"
-        in (
-            re.search(
-                r"<key>NSPrivacyTracking</key>\s*<(true|false)/>",
-                text,
-            )
-            or [None, "false"]
-        )[1]
-    )
+    """Parse PrivacyInfo.xcprivacy while preserving each API-to-reason binding."""
+    try:
+        payload = plistlib.loads(text.encode("utf-8"))
+    except (ValueError, plistlib.InvalidFileException, ExpatError) as exc:
+        raise ValueError("malformed privacy manifest plist") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("privacy manifest root must be a dictionary")
+
+    collected_entries = payload.get("NSPrivacyCollectedDataTypes", [])
+    api_entries = payload.get("NSPrivacyAccessedAPITypes", [])
+    tracking = payload.get("NSPrivacyTracking", False)
+    if not isinstance(collected_entries, list):
+        raise ValueError("NSPrivacyCollectedDataTypes must be an array")
+    if not isinstance(api_entries, list):
+        raise ValueError("NSPrivacyAccessedAPITypes must be an array")
+    if not isinstance(tracking, bool):
+        raise ValueError("NSPrivacyTracking must be a boolean")
+
+    collected: list[str] = []
+    for entry in collected_entries:
+        if not isinstance(entry, dict):
+            raise ValueError("collected-data entries must be dictionaries")
+        data_type = entry.get("NSPrivacyCollectedDataType")
+        if not isinstance(data_type, str) or not data_type:
+            raise ValueError("collected-data entries require NSPrivacyCollectedDataType")
+        collected.append(data_type)
+
+    api_types: list[str] = []
+    reasons: list[str] = []
+    invalid_reason_bindings: list[str] = []
+    api_reason_bindings: dict[str, list[str]] = {}
+    for entry in api_entries:
+        if not isinstance(entry, dict):
+            raise ValueError("accessed-API entries must be dictionaries")
+        api_type = entry.get("NSPrivacyAccessedAPIType")
+        api_reasons = entry.get("NSPrivacyAccessedAPITypeReasons")
+        if not isinstance(api_type, str) or not api_type:
+            raise ValueError("accessed-API entries require NSPrivacyAccessedAPIType")
+        if not isinstance(api_reasons, list) or not api_reasons:
+            raise ValueError(f"{api_type} requires a non-empty reasons array")
+        if not all(isinstance(reason, str) and reason for reason in api_reasons):
+            raise ValueError(f"{api_type} reasons must be non-empty strings")
+
+        api_types.append(api_type)
+        api_reason_bindings.setdefault(api_type, []).extend(api_reasons)
+        reasons.extend(api_reasons)
+        for reason in api_reasons:
+            reason_family = KNOWN_REASONS.get(reason)
+            if reason_family is None:
+                invalid_reason_bindings.append(f"{reason} is not a recognized required reason")
+                continue
+            expected_api_type = f"NSPrivacyAccessedAPICategory{reason_family}"
+            if api_type != expected_api_type:
+                invalid_reason_bindings.append(
+                    f"{reason} does not belong to {api_type}; expected {expected_api_type}"
+                )
+
     return {
         "collected_types": collected,
         "api_types": api_types,
+        "api_reason_bindings": api_reason_bindings,
         "reasons": reasons,
+        "invalid_reason_bindings": invalid_reason_bindings,
         "tracking": tracking,
     }
 
@@ -195,7 +234,17 @@ def check_privacy_manifest(root: Path) -> dict[str, Any]:
             sources=[],
             fix="Restore PrivacyInfo.xcprivacy from main.",
         )
-    parsed = parse_privacy_manifest(text)
+    try:
+        parsed = parse_privacy_manifest(text)
+    except ValueError as exc:
+        return _check(
+            "privacy_manifest",
+            "PrivacyInfo.xcprivacy structure",
+            "fail",
+            f"malformed PrivacyInfo.xcprivacy: {exc}",
+            sources=[str(path)],
+            fix="Regenerate a valid privacy manifest and preserve each API-to-reason binding.",
+        )
     swift_files = _iter_swift_files(root)
     if not swift_files:
         return _check(
@@ -207,7 +256,7 @@ def check_privacy_manifest(root: Path) -> dict[str, Any]:
         )
     blob, used = _concat_sources(swift_files)
     usage = scan_required_reason_usage(blob)
-    issues: list[str] = []
+    issues: list[str] = list(parsed["invalid_reason_bindings"])
     # C617.1 declared but no file-timestamp API usage → fail (known #179 finding)
     if "C617.1" in parsed["reasons"] and not usage["FileTimestamp"]:
         issues.append(
@@ -421,6 +470,126 @@ def check_storekit_and_purchase_ctas(root: Path) -> dict[str, Any]:
     )
 
 
+def _static_tombstone_value(node: ast.expr) -> bool:
+    """Allow only inert constants in module-level tombstone metadata."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (str, int, float, bool, type(None)))
+    if isinstance(node, ast.JoinedStr):
+        return all(
+            isinstance(value, ast.Constant)
+            or (
+                isinstance(value, ast.FormattedValue)
+                and isinstance(value.value, ast.Name)
+                and value.value.id.isupper()
+            )
+            for value in node.values
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _static_tombstone_value(node.left) and _static_tombstone_value(node.right)
+    return False
+
+
+def _tombstone_function_is_fail_closed(node: ast.FunctionDef) -> bool:
+    if node.decorator_list or node.args.defaults or any(node.args.kw_defaults):
+        return False
+    body = list(node.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body.pop(0)
+    if not body or not isinstance(body[-1], ast.Raise):
+        return False
+    if any(not isinstance(statement, ast.Delete) for statement in body[:-1]):
+        return False
+    if any(
+        not all(isinstance(target, ast.Name) for target in statement.targets)
+        for statement in body[:-1]
+    ):
+        return False
+    raised = body[-1].exc
+    return (
+        isinstance(raised, ast.Call)
+        and isinstance(raised.func, ast.Name)
+        and raised.func.id == "SystemExit"
+        and len(raised.args) == 1
+        and isinstance(raised.args[0], ast.Name)
+        and raised.args[0].id == "DISABLED_MESSAGE"
+        and not raised.keywords
+    )
+
+
+def _is_main_guard(node: ast.If) -> bool:
+    test = node.test
+    return (
+        isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Name)
+        and test.left.id == "__name__"
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+        and len(test.comparators) == 1
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value == "__main__"
+        and not node.orelse
+        and len(node.body) == 1
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Call)
+        and isinstance(node.body[0].value.func, ast.Name)
+        and node.body[0].value.func.id == "main"
+        and not node.body[0].value.args
+        and not node.body[0].value.keywords
+    )
+
+
+def _reviewer_seeder_problem(text: str) -> str | None:
+    try:
+        module = ast.parse(text)
+    except SyntaxError as exc:
+        return f"invalid Python syntax: {exc.msg}"
+
+    functions: dict[str, ast.FunctionDef] = {}
+    for index, node in enumerate(module.body):
+        if (
+            index == 0
+            and isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            continue
+        if isinstance(node, ast.Assign):
+            if (
+                node.targets
+                and all(
+                    isinstance(target, ast.Name) and target.id.isupper() for target in node.targets
+                )
+                and _static_tombstone_value(node.value)
+            ):
+                continue
+            return "contains executable module-level assignment"
+        if isinstance(node, ast.FunctionDef) and node.name in {"seed_demo_tenant", "main"}:
+            if node.name in functions:
+                return f"contains duplicate {node.name} definition"
+            functions[node.name] = node
+            continue
+        if isinstance(node, ast.If) and _is_main_guard(node):
+            if index != len(module.body) - 1 or "main" not in functions:
+                return "main guard must be final and follow the tombstone definition"
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return "imports modules before refusing execution"
+        return f"contains executable module-level {type(node).__name__}"
+
+    for name in ("seed_demo_tenant", "main"):
+        function = functions.get(name)
+        if function is None or not _tombstone_function_is_fail_closed(function):
+            return f"{name} is not an unconditional SystemExit tombstone"
+    return None
+
+
 def check_reviewer_seeder(root: Path) -> dict[str, Any]:
     path = root / "scripts" / "seed_demo_tenant.py"
     text = _read_text(path)
@@ -432,30 +601,47 @@ def check_reviewer_seeder(root: Path) -> dict[str, Any]:
             "scripts/seed_demo_tenant.py missing",
             sources=[],
         )
-    if "DISABLED_MESSAGE" not in text or "SystemExit" not in text:
+    problem = _reviewer_seeder_problem(text)
+    if problem is not None:
         return _check(
             "reviewer_seeder",
             "Reviewer demo seeder fail-closed",
             "fail",
-            "seeder is not a fail-closed tombstone",
+            f"seeder is not a fail-closed tombstone: {problem}",
             sources=[str(path)],
             fix="Restore #188/#195 containment; see issue #185.",
-        )
-    if "from app" in text or "import app" in text:
-        return _check(
-            "reviewer_seeder",
-            "Reviewer demo seeder fail-closed",
-            "fail",
-            "seeder imports application modules (unsafe)",
-            sources=[str(path)],
         )
     return _check(
         "reviewer_seeder",
         "Reviewer demo seeder fail-closed",
         "pass",
-        "tombstone exits before config/DB; full App Review demo still held (#185)",
+        "AST proves both callable and CLI paths unconditionally raise before side effects",
         sources=[str(path), "https://github.com/Ayyitskevin/Focal/issues/185"],
     )
+
+
+DEVICE_QA_EVIDENCE_FIELDS = (
+    ("Test date", r"(?mi)^Test date:\s*\d{4}-\d{2}-\d{2}\s*$"),
+    ("Commit", r"(?mi)^Commit:\s*[0-9a-f]{40}\s*$"),
+    ("Tester", r"(?mi)^Tester:\s*\S.+$"),
+    ("Device", r"(?mi)^Device:\s*\S.+$"),
+    ("OS", r"(?mi)^OS:\s*\S.+$"),
+    ("Result", r"(?mi)^Result:\s*PASS\s*$"),
+    ("Poster frame", r"(?mi)^Poster frame:\s*PASS\s*$"),
+    ("Playback", r"(?mi)^Playback:\s*PASS\s*$"),
+    ("Audio", r"(?mi)^Audio:\s*PASS\s*$"),
+)
+
+
+def _device_qa_evidence_problem(text: str | None) -> str | None:
+    if text is None or not text.strip():
+        return "incomplete device QA evidence: document is empty or unreadable"
+    missing = [
+        label for label, pattern in DEVICE_QA_EVIDENCE_FIELDS if not re.search(pattern, text)
+    ]
+    if missing:
+        return f"incomplete device QA evidence; missing valid fields: {', '.join(missing)}"
+    return None
 
 
 def check_gallery_video_device_qa(root: Path) -> dict[str, Any]:
@@ -475,12 +661,6 @@ def check_gallery_video_device_qa(root: Path) -> dict[str, Any]:
     has_structure = "GalleryMediaPresentation" in v_text and (
         "VideoPlayer" in vid_text or "AVPlayer" in vid_text
     )
-    # Device evidence artifact?
-    evidence_paths = [
-        root / "docs" / "DEVICE-QA-GALLERY-VIDEO.md",
-        root / "docs" / "IOS-GALLERY-DEVICE-QA.md",
-    ]
-    has_device_doc = any(p.is_file() for p in evidence_paths)
     if not has_structure:
         return _check(
             "gallery_video_qa",
@@ -489,21 +669,39 @@ def check_gallery_video_device_qa(root: Path) -> dict[str, Any]:
             "poster/AVPlayer presentation structure not found",
             sources=sources,
         )
-    if not has_device_doc:
+
+    evidence_paths = [
+        root / "docs" / "DEVICE-QA-GALLERY-VIDEO.md",
+        root / "docs" / "IOS-GALLERY-DEVICE-QA.md",
+    ]
+    evidence = [(path, _read_text(path)) for path in evidence_paths if path.is_file()]
+    if not evidence:
         return _check(
             "gallery_video_qa",
             "Gallery video device QA evidence",
             "blocked",
             "code structure present; no device/simulator QA evidence artifact (Linux CI cannot run xcodebuild)",
             sources=sources,
-            fix="Run Xcode gallery video QA on device/sim and file evidence under docs/ (#183 residual).",
+            fix="Run Xcode gallery video QA on device/sim and file structured evidence under docs/.",
+        )
+
+    valid_paths = [path for path, text in evidence if _device_qa_evidence_problem(text) is None]
+    if not valid_paths:
+        problems = [f"{path.name}: {_device_qa_evidence_problem(text)}" for path, text in evidence]
+        return _check(
+            "gallery_video_qa",
+            "Gallery video device QA evidence",
+            "blocked",
+            "; ".join(problems),
+            sources=sources + [str(path) for path, _text in evidence],
+            fix="Record exact commit, tester, device/OS, and passing poster/playback/audio results.",
         )
     return _check(
         "gallery_video_qa",
         "Gallery video device QA evidence",
         "pass",
-        "structure + device QA doc present",
-        sources=sources + [str(p) for p in evidence_paths if p.is_file()],
+        "presentation structure plus schema-validated device QA evidence",
+        sources=sources + [str(path) for path in valid_paths],
     )
 
 
@@ -527,10 +725,16 @@ def build_report(project_root: Path | None = None) -> dict[str, Any]:
         "reviewer-demo replacement #185",
         "device gallery video QA residual (#183)",
     ]
-    # Engineering-style "clean" only if no fails (blocked/n/a allowed)
-    clean = counts["fail"] == 0
+    ready = counts["fail"] == 0 and counts["blocked"] == 0
+    if counts["fail"]:
+        verdict = "AUDIT_FAILED"
+    elif counts["blocked"]:
+        verdict = "AUDIT_BLOCKED"
+    else:
+        verdict = "AUDIT_CLEAN"
     return {
-        "ready": clean,  # local audit ran without product defects; NOT App Store approval
+        "audit_completed": True,
+        "ready": ready,
         "app_store_ship": app_store_ship,
         "app_store_ship_reason": "; ".join(ship_reasons),
         "checks": checks,
@@ -539,7 +743,7 @@ def build_report(project_root: Path | None = None) -> dict[str, Any]:
         "failures": counts["fail"],
         "blocked": counts["blocked"],
         "not_applicable": counts["not_applicable"],
-        "verdict": "AUDIT_CLEAN" if clean else "AUDIT_FAILED",
+        "verdict": verdict,
     }
 
 
@@ -560,8 +764,8 @@ def format_text(report: dict[str, Any]) -> str:
     )
     lines.append(f"APP STORE SHIP: {report['app_store_ship']} — {report['app_store_ship_reason']}")
     lines.append(
-        "Note: AUDIT_CLEAN means local evidence inventory ran without hard defects; "
-        "it is not App Store Connect approval."
+        "Note: AUDIT_CLEAN requires zero fail and zero blocked checks; "
+        "App Store Connect approval remains a separate human gate."
     )
     return "\n".join(lines)
 

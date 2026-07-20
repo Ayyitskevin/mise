@@ -45,6 +45,9 @@ python scripts/rc-acceptance.py --no-tests  # structural only (fast)
 Exit code **0** = no **fail** lines (product gates green). **Blocked** / **n/a** (e.g. Xcode on Linux, hosted preflight when not SAAS_MODE) do not fail the exit code.  
 **STORE SHIP** is always printed as **do-not-ship** with #179/#180/#185 reason — this tool never claims App Store readiness.
 
+The separate App Store auditor exits **0 only when every applicable check passes**.
+`audit_completed: true` records execution; it never converts blocked evidence into readiness.
+
 ---
 
 ## Capability truth (acceptance path only)
