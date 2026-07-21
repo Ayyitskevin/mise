@@ -230,6 +230,47 @@ def test_malformed_privacy_manifest_fails(tmp_path):
     assert "malformed" in c["detail"].lower()
 
 
+@pytest.mark.parametrize(
+    ("reason", "family"),
+    (
+        ("DDA9.1", "FileTimestamp"),
+        ("C617.1", "FileTimestamp"),
+        ("3B52.1", "FileTimestamp"),
+        ("0A2A.1", "FileTimestamp"),
+        ("35F9.1", "SystemBootTime"),
+        ("8FFB.1", "SystemBootTime"),
+        ("3D61.1", "SystemBootTime"),
+        ("85F4.1", "DiskSpace"),
+        ("E174.1", "DiskSpace"),
+        ("7D9E.1", "DiskSpace"),
+        ("B728.1", "DiskSpace"),
+        ("3EC4.1", "ActiveKeyboards"),
+        ("54BD.1", "ActiveKeyboards"),
+        ("CA92.1", "UserDefaults"),
+        ("1C8F.1", "UserDefaults"),
+        ("C56D.1", "UserDefaults"),
+        ("AC6B.1", "UserDefaults"),
+    ),
+)
+def test_current_apple_required_reason_catalog_bindings(reason, family):
+    privacy = f"""<?xml version="1.0"?>
+<plist><dict>
+<key>NSPrivacyAccessedAPITypes</key><array>
+<dict>
+<key>NSPrivacyAccessedAPIType</key>
+<string>NSPrivacyAccessedAPICategory{family}</string>
+<key>NSPrivacyAccessedAPITypeReasons</key>
+<array><string>{reason}</string></array>
+</dict>
+</array>
+</dict></plist>
+"""
+
+    parsed = asr.parse_privacy_manifest(privacy)
+
+    assert parsed["invalid_reason_bindings"] == []
+
+
 def test_marker_strings_do_not_make_enabled_seeder_pass(tmp_path):
     root = tmp_path / "app"
     _minimal_ios_tree(

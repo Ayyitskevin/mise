@@ -22,15 +22,26 @@ from xml.parsers.expat import ExpatError
 
 STATUSES = ("pass", "fail", "blocked", "not_applicable")
 
-# Required-reason API reason codes we understand how to inventory.
+# Required-reason API bindings from Apple's live NSPrivacyAccessedAPIType catalog.
+# Unknown codes fail closed so a future Apple update requires an explicit refresh.
 KNOWN_REASONS = {
-    "CA92.1": "UserDefaults",  # app-scoped defaults
-    "C617.1": "FileTimestamp",  # file timestamps
-    "0A2A.1": "DiskSpace",
-    "E174.1": "FileTimestamp",
+    "DDA9.1": "FileTimestamp",
+    "C617.1": "FileTimestamp",
+    "3B52.1": "FileTimestamp",
+    "0A2A.1": "FileTimestamp",
     "35F9.1": "SystemBootTime",
     "8FFB.1": "SystemBootTime",
-    "3B52.1": "DiskSpace",
+    "3D61.1": "SystemBootTime",
+    "85F4.1": "DiskSpace",
+    "E174.1": "DiskSpace",
+    "7D9E.1": "DiskSpace",
+    "B728.1": "DiskSpace",
+    "3EC4.1": "ActiveKeyboards",
+    "54BD.1": "ActiveKeyboards",
+    "CA92.1": "UserDefaults",
+    "1C8F.1": "UserDefaults",
+    "C56D.1": "UserDefaults",
+    "AC6B.1": "UserDefaults",
 }
 
 # Heuristic patterns for required-reason APIs (Swift).
