@@ -64,6 +64,7 @@ actor OwnerRepository {
         static let dashboard = "dashboard.v1"
         static let clients = "clients.v1"
         static let projects = "projects.v1"
+        static let inquiries = "inquiries.v1"
         static let galleries = "galleries.v1"
         static let bookings = "bookings.v1"
         static let legacyPendingBookingReschedule = "booking.reschedule.pending.v1"
@@ -134,6 +135,17 @@ actor OwnerRepository {
             MiseEndpoints.Projects.list(cursor: cursor, limit: 100)
         }
         return try await persist(values, key: Key.projects)
+    }
+
+    func cachedInquiries() async throws -> ResourceSnapshot<[InquirySummary]>? {
+        try await cached(Key.inquiries, as: [InquirySummary].self)
+    }
+
+    func refreshInquiries() async throws -> ResourceSnapshot<[InquirySummary]> {
+        let values = try await fetchAll { cursor in
+            MiseEndpoints.Inquiries.list(cursor: cursor, limit: 100)
+        }
+        return try await persist(values, key: Key.inquiries)
     }
 
     func cachedGalleries() async throws -> ResourceSnapshot<[GallerySummary]>? {
@@ -526,12 +538,14 @@ actor OwnerRepository {
         etag: String? = nil,
         storedAt: Date = Date()
     ) async throws -> ResourceSnapshot<Value> {
+        try await requireActiveCache()
         let record = try await cache.write(
             value,
             key: key,
             etag: etag,
             storedAt: storedAt
         )
+        try await requireActiveCache()
         return ResourceSnapshot(
             value: record.value,
             storedAt: record.storedAt,

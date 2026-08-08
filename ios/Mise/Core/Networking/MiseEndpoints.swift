@@ -172,6 +172,23 @@ enum MiseEndpoints {
         }
     }
 
+    /// Owner lead inbox — read-only.
+    enum Inquiries {
+        static func list(
+            cursor: String? = nil,
+            limit: Int = 25
+        ) -> APIEndpoint<APIPage<InquirySummary>> {
+            APIEndpoint(
+                method: .get,
+                path: "/api/v1/inquiries",
+                queryItems: [
+                    APIQueryItem(name: "cursor", value: cursor),
+                    APIQueryItem(name: "limit", value: String(min(max(limit, 1), 100))),
+                ]
+            )
+        }
+    }
+
     /// Owner commercial spine — read-only (queue S8).
     enum Commercial {
         static func companies(

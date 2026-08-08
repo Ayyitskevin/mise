@@ -480,3 +480,223 @@ def test_open_tasks_rejects_tampered_cursor(owner):
 def test_open_tasks_refuses_to_emit_noncanonical_stored_boundary(owner):
     with pytest.raises(ValueError, match="canonical YYYY-MM-DD"):
         mobile_owner_api._encode_task_cursor({"id": 1, "due_date": "20260710"})
+
+
+def _insert_inquiry(
+    name: str,
+    *,
+    email: str = "",
+    business: str | None = None,
+    message: str = "Hello",
+    kind: str = "contact",
+    phone: str = "",
+    service: str | None = None,
+    shoot_date: str | None = None,
+    emailed: bool = False,
+    converted_at: str | None = None,
+    converted_client_id: int | None = None,
+    converted_project_id: int | None = None,
+    dismissed_at: str | None = None,
+) -> int:
+    return db.run(
+        """INSERT INTO inquiries
+           (name,email,business,message,kind,phone,service,shoot_date,emailed,
+            converted_at,converted_client_id,converted_project_id,dismissed_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            name,
+            email,
+            business,
+            message,
+            kind,
+            phone,
+            service,
+            shoot_date,
+            int(emailed),
+            converted_at,
+            converted_client_id,
+            converted_project_id,
+            dismissed_at,
+        ),
+    )
+
+
+def test_inquiries_requires_owner_principal(owner, monkeypatch):
+    client, headers, _ = owner
+    assert client.get("/api/v1/inquiries").status_code == 401
+    assert client.get("/api/v1/inquiries", headers=headers).status_code == 200
+    guest = _principal(kind=mobile_auth.GALLERY_GUEST, scopes=frozenset({"studio:read"}))
+    monkeypatch.setattr(mobile_auth, "authenticate_request", lambda *args, **kwargs: guest)
+    response = client.get("/api/v1/inquiries", headers=headers)
+    assert response.status_code == 403
+    assert response.json()["code"] == "auth.insufficient_scope"
+
+
+def test_inquiries_maps_storage_fields_and_triage_state(owner):
+    client, headers, _ = owner
+    client_id = db.run("INSERT INTO clients (name) VALUES ('Converted client')")
+    project_id = db.run(
+        "INSERT INTO projects (client_id,title,status) VALUES (?,?,?)",
+        (client_id, "Converted project", "session_planning"),
+    )
+    open_id = _insert_inquiry(
+        "Open Lead",
+        email="open@example.test",
+        business="Open Co",
+        message="First line\n\nsecond   line",
+        kind="booking",
+        service="Wedding",
+        shoot_date="2026-09-12",
+    )
+    db.run(
+        "INSERT INTO messages (inquiry_id,direction,channel,body) VALUES (?,'in','sms',?)",
+        (open_id, "An inbound message is not a studio reply."),
+    )
+    notified_id = _insert_inquiry(
+        "Notification Only",
+        email="notified@example.test",
+        emailed=True,
+    )
+    sms_id = _insert_inquiry("+15551234567", kind="sms", phone="+15551234567")
+    db.run(
+        "INSERT INTO messages (inquiry_id,direction,channel,body) VALUES (?,'out','sms',?)",
+        (sms_id, "Thanks — we will follow up."),
+    )
+    converted_id = _insert_inquiry(
+        "Converted Lead",
+        email="converted@example.test",
+        converted_at="2026-07-01 10:00:00",
+        converted_client_id=client_id,
+        converted_project_id=project_id,
+    )
+    dismissed_id = _insert_inquiry("Dismissed Lead", dismissed_at="2026-07-02 10:00:00")
+
+    response = client.get("/api/v1/inquiries", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-cache"
+    body = response.json()
+    assert body["has_more"] is False
+    assert body["next_cursor"] is None
+    # Newest first (id DESC), all triage states included.
+    assert [item["id"] for item in body["items"]] == [
+        dismissed_id,
+        converted_id,
+        sms_id,
+        notified_id,
+        open_id,
+    ]
+    by_id = {item["id"]: item for item in body["items"]}
+
+    open_item = by_id[open_id]
+    assert open_item["name"] == "Open Lead"
+    assert open_item["business"] == "Open Co"
+    assert open_item["email"] == "open@example.test"
+    assert open_item["phone"] is None
+    assert open_item["kind"] == "booking"
+    assert open_item["service"] == "Wedding"
+    assert open_item["shoot_on"] == "2026-09-12"
+    assert open_item["message_preview"] == "First line second line"
+    assert open_item["status"] == "open"
+    assert open_item["is_replied"] is False
+    assert open_item["converted_client_id"] is None
+    assert open_item["converted_project_id"] is None
+    assert open_item["received_at"].endswith("Z")
+
+    sms_item = by_id[sms_id]
+    assert sms_item["email"] is None  # empty string normalized away
+    assert sms_item["phone"] == "+15551234567"
+    assert sms_item["is_replied"] is True
+    assert by_id[notified_id]["is_replied"] is False
+
+    converted_item = by_id[converted_id]
+    assert converted_item["status"] == "converted"
+    assert converted_item["converted_client_id"] == client_id
+    assert converted_item["converted_project_id"] == project_id
+
+    assert by_id[dismissed_id]["status"] == "dismissed"
+
+    # Full message bodies and internal flags never leak onto the wire.
+    assert "emailed" not in response.text
+    assert "converted_at" not in response.text
+    assert "dismissed_at" not in response.text
+
+    cached = client.get(
+        "/api/v1/inquiries", headers={**headers, "If-None-Match": response.headers["etag"]}
+    )
+    assert cached.status_code == 304
+
+    db.run(
+        "INSERT INTO messages (inquiry_id,direction,channel,body) VALUES (?,'out','email',?)",
+        (open_id, "Reply sent from the inbox."),
+    )
+    refreshed = client.get(
+        "/api/v1/inquiries", headers={**headers, "If-None-Match": response.headers["etag"]}
+    )
+    assert refreshed.status_code == 200
+    assert refreshed.headers["etag"] != response.headers["etag"]
+    refreshed_open = next(item for item in refreshed.json()["items"] if item["id"] == open_id)
+    assert refreshed_open["is_replied"] is True
+
+
+def test_inquiries_bounds_untrusted_legacy_fields_and_malformed_dates(owner):
+    client, headers, _ = owner
+    inquiry_id = _insert_inquiry(
+        f"  {'N' * 2500}  ",
+        email="   ",
+        business=f"  {'B' * 2500}  ",
+        message=("word \n\t" * 2000),
+        kind="   ",
+        phone=f"  {'1' * 2500}  ",
+        service=f"  {'S' * 2500}  ",
+        shoot_date="not-a-date",
+    )
+
+    response = client.get("/api/v1/inquiries", headers=headers)
+
+    assert response.status_code == 200
+    item = next(value for value in response.json()["items"] if value["id"] == inquiry_id)
+    assert len(item["name"]) == 2000
+    assert len(item["business"]) == 2000
+    assert item["email"] is None
+    assert len(item["phone"]) == 2000
+    assert item["kind"] == "unknown"
+    assert len(item["service"]) == 2000
+    assert item["shoot_on"] is None
+    assert len(item["message_preview"]) == 280
+    assert "\n" not in item["message_preview"]
+    assert "\t" not in item["message_preview"]
+
+
+def test_inquiries_cursor_pages_and_rejects_bad_cursors(owner):
+    client, headers, _ = owner
+    for index in range(27):
+        _insert_inquiry(f"Lead {index:02d}", email=f"lead{index:02d}@example.test")
+
+    first = client.get("/api/v1/inquiries", headers=headers)
+    assert first.status_code == 200
+    assert len(first.json()["items"]) == 25
+    assert first.json()["has_more"] is True
+
+    cursor = first.json()["next_cursor"]
+    second = client.get("/api/v1/inquiries", params={"cursor": cursor}, headers=headers)
+    assert second.status_code == 200
+    assert len(second.json()["items"]) == 2
+    assert second.json()["has_more"] is False
+
+    tampered = ("A" if cursor[0] != "A" else "B") + cursor[1:]
+    invalid = client.get("/api/v1/inquiries", params={"cursor": tampered}, headers=headers)
+    assert invalid.status_code == 422
+    assert invalid.json()["code"] == "pagination.invalid_cursor"
+
+    # A cursor minted for another owner collection must not cross over.
+    foreign = mobile_owner_api._encode_cursor("clients", 1)
+    crossed = client.get("/api/v1/inquiries", params={"cursor": foreign}, headers=headers)
+    assert crossed.status_code == 422
+    assert crossed.json()["code"] == "pagination.invalid_cursor"
+
+
+@pytest.mark.parametrize("limit", [0, 101])
+def test_inquiries_enforces_limit_bounds(owner, limit):
+    client, headers, _ = owner
+    response = client.get("/api/v1/inquiries", params={"limit": limit}, headers=headers)
+    assert response.status_code == 422

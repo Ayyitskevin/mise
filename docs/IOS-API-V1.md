@@ -162,6 +162,7 @@ not become a client-wide session.
 | --- | --- |
 | `GET /api/v1/dashboard` | `DashboardSummary` |
 | `GET /api/v1/tasks` | `Page<TaskSummary>` containing every open Mise studio-task row |
+| `GET /api/v1/inquiries` | `Page<InquirySummary>` containing the read-only owner lead inbox |
 | `GET /api/v1/clients` | `Page<ClientSummary>` |
 | `GET /api/v1/clients/{id}` | client detail |
 | `GET /api/v1/projects` | `Page<ProjectSummary>` |
@@ -180,6 +181,14 @@ not become a client-wide session.
 The Milestone 2 endpoints are available only to the exact `studio_owner`
 principal with `studio:read`. Client/project detail, AI-run, and
 cull-result reads remain reserved contract surface until their delivery slices.
+
+`GET /api/v1/inquiries` includes open, converted, and dismissed rows newest-first.
+It returns bounded contact fields and a whitespace-collapsed message preview rather
+than a full thread. `is_replied` means the thread contains a recorded outbound
+message; delivery of the studio's new-inquiry notification does not count as a reply.
+Malformed legacy shoot dates remain explicitly unavailable instead of failing the
+whole inbox. The collection uses the same signed, resource-bound cursor limits and
+private ETag behavior as the other owner lists.
 
 `GET /api/v1/tasks` is the complete open feed for existing Mise
 studio-operation task rows (`done=0`), not a claim over general or personal
