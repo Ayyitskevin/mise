@@ -59,6 +59,18 @@ enum MiseEndpoints {
             path: "/api/v1/me"
         )
 
+        static let sessions = APIEndpoint<SessionListResponse>(
+            method: .get,
+            path: "/api/v1/auth/sessions"
+        )
+
+        static func revokeSession(id: String) -> APIEndpoint<EmptyResponse> {
+            APIEndpoint(
+                method: .delete,
+                path: "/api/v1/auth/sessions/\(id)"
+            )
+        }
+
         static let logout = APIEndpoint<EmptyResponse>(
             method: .post,
             path: "/api/v1/auth/logout"

@@ -67,6 +67,15 @@ and avoiding it in the foundation keeps auth/session behavior auditable.
   status remains recoverable after the booking moves. A refresh-time continuity
   guard rejects a changed backend session ID. The server capability stays
   default-off (`MISE_BOOKING_WORKFLOW_ENABLED`) pending human review.
+- Milestone 4b keeps client document decisions in-app while staying
+  web-executed (docs/IOS-UPGRADE.md item ④): proposal accept/decline,
+  contract signing, and invoice checkout still run on the studio's canonical
+  server-rendered pages, now presented in an in-app Safari sheet so the client
+  never leaves the app shell; the affected documents revalidate when the sheet
+  is dismissed. The owner companion also gains a Devices screen (from the
+  account menu) listing signed-in studio sessions network-first — never
+  cached — with confirmed revocation of other sessions; revoking an
+  already-ended session (404) is treated as success.
 - The owner companion's Home “Up next” area is a truthful six-row preview with
   a pushed, complete studio-task inbox. That feed aggregates every open Focal
   studio-operation row in session memory only, uses the workspace timezone for

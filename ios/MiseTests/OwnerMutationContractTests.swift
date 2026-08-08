@@ -1083,6 +1083,102 @@ final class OwnerMutationContractTests: XCTestCase {
         XCTAssertNil(cachedDashboard)
     }
 
+    func testSessionEndpointsUseBodylessBearerGetAndDelete() {
+        let list = MiseEndpoints.Auth.sessions
+        let revoke = MiseEndpoints.Auth.revokeSession(id: "sess_old")
+
+        XCTAssertEqual(list.method, .get)
+        XCTAssertEqual(list.path, "/api/v1/auth/sessions")
+        XCTAssertEqual(list.authentication, .bearer)
+        XCTAssertTrue(list.queryItems.isEmpty)
+        XCTAssertNil(list.body)
+        XCTAssertNil(list.idempotencyKey)
+        XCTAssertNil(list.etag)
+        XCTAssertEqual(revoke.method, .delete)
+        XCTAssertEqual(revoke.path, "/api/v1/auth/sessions/sess_old")
+        XCTAssertEqual(revoke.authentication, .bearer)
+        XCTAssertTrue(revoke.queryItems.isEmpty)
+        XCTAssertNil(revoke.body)
+        XCTAssertNil(revoke.idempotencyKey)
+    }
+
+    func testDeviceSessionRefreshDecodesAndStaysNetworkOnly() async throws {
+        let context = makeCache()
+        defer { try? FileManager.default.removeItem(at: context.root) }
+        try await context.cache.write(Self.dashboard, key: "dashboard.v1", etag: nil)
+        let cacheBefore = try fileTree(at: context.root)
+        let client = OwnerMutationContractClient([
+            .value(Data(Self.sessionListJSON.utf8)),
+        ])
+        let repository = OwnerRepository(client: client, cache: context.cache)
+
+        let snapshot = try await repository.refreshDeviceSessions()
+        let cacheAfter = try fileTree(at: context.root)
+        let requests = await client.capturedRequests()
+
+        XCTAssertEqual(snapshot.source, .network)
+        XCTAssertEqual(snapshot.value.map(\.id), ["sess_current", "sess_old"])
+        XCTAssertTrue(snapshot.value[0].isCurrent)
+        XCTAssertFalse(snapshot.value[1].isCurrent)
+        XCTAssertEqual(snapshot.value[1].device.name, "Studio iPad")
+        XCTAssertNotNil(snapshot.value[1].revokedAt)
+        XCTAssertEqual(cacheAfter, cacheBefore)
+        XCTAssertEqual(requests.map(\.method), [.get])
+        XCTAssertEqual(requests.map(\.path), ["/api/v1/auth/sessions"])
+    }
+
+    func testRevokeDeviceSessionSendsBodylessDelete() async throws {
+        let context = makeCache()
+        defer { try? FileManager.default.removeItem(at: context.root) }
+        let client = OwnerMutationContractClient([
+            .value(Data(#"{}"#.utf8)),
+        ])
+        let repository = OwnerRepository(client: client, cache: context.cache)
+
+        try await repository.revokeDeviceSession(id: "sess_old")
+        let requests = await client.capturedRequests()
+
+        XCTAssertEqual(requests.map(\.method), [.delete])
+        XCTAssertEqual(requests.map(\.path), ["/api/v1/auth/sessions/sess_old"])
+        XCTAssertNil(requests.first?.body)
+        XCTAssertNil(requests.first?.idempotencyKey)
+    }
+
+    func testRevokeAlreadyEndedSessionIsTreatedAsSuccess() async throws {
+        let context = makeCache()
+        defer { try? FileManager.default.removeItem(at: context.root) }
+        let client = OwnerMutationContractClient([
+            .failure(.server(status: 404, problem: nil)),
+        ])
+        let repository = OwnerRepository(client: client, cache: context.cache)
+
+        // The session expired or was revoked elsewhere; "gone" is the goal
+        // state, so the 404 must not surface as a failure.
+        try await repository.revokeDeviceSession(id: "sess_old")
+        let requests = await client.capturedRequests()
+
+        XCTAssertEqual(requests.map(\.method), [.delete])
+        XCTAssertEqual(requests.map(\.path), ["/api/v1/auth/sessions/sess_old"])
+    }
+
+    func testRevokeDeviceSessionFailureThrows() async throws {
+        let context = makeCache()
+        defer { try? FileManager.default.removeItem(at: context.root) }
+        let client = OwnerMutationContractClient([
+            .failure(.server(status: 503, problem: nil)),
+        ])
+        let repository = OwnerRepository(client: client, cache: context.cache)
+
+        do {
+            try await repository.revokeDeviceSession(id: "sess_old")
+            XCTFail("Expected the failed revocation to throw.")
+        } catch let APIError.server(status, _) {
+            XCTAssertEqual(status, 503)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     private func makeCache() -> (root: URL, cache: TenantJSONCache) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("owner-mutation-tests-\(UUID().uuidString)")
@@ -1110,6 +1206,31 @@ final class OwnerMutationContractTests: XCTestCase {
     private static func date(_ value: String) throws -> Date {
         try MiseJSON.decoder().decode(Date.self, from: Data("\"\(value)\"".utf8))
     }
+
+    private static let sessionListJSON = """
+    {
+      "sessions": [
+        {
+          "id": "sess_current",
+          "device": {"name": "Kevin’s iPhone", "platform": "ios", "app_version": "1.0"},
+          "created_at": "2026-07-01T12:00:00Z",
+          "last_seen_at": "2026-07-13T14:15:16Z",
+          "expires_at": "2026-07-31T12:00:00Z",
+          "is_current": true,
+          "revoked_at": null
+        },
+        {
+          "id": "sess_old",
+          "device": {"name": "Studio iPad", "platform": "ios", "app_version": "0.9"},
+          "created_at": "2026-06-01T12:00:00Z",
+          "last_seen_at": "2026-06-19T09:30:00Z",
+          "expires_at": "2026-06-30T12:00:00Z",
+          "is_current": false,
+          "revoked_at": "2026-06-20T09:30:00Z"
+        }
+      ]
+    }
+    """
 
     private static let rescheduleResultJSON = """
     {"status":"rescheduled","workflow_id":"86aa7d32-740e-4993-af8d-438bb80c366b","delivery_status":"pending","original_booking_id":91,"replacement_booking_id":92,"start_at":"2026-07-16T13:00:00Z","end_at":"2026-07-16T14:00:00Z"}

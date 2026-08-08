@@ -5,9 +5,11 @@ import SwiftUI
 /// a single-document link shows just that document; gallery and portal links
 /// have no document authority at all.
 ///
-/// Accept, Sign, and Pay intentionally open the canonical web pages —
-/// signatures and Stripe checkout stay server-rendered flows in Milestone 3
-/// (docs/IOS-ARCHITECTURE.md §8).
+/// Accept, Sign, and Pay stay on the canonical web pages — signatures and
+/// Stripe checkout remain server-rendered flows (docs/IOS-ARCHITECTURE.md §8,
+/// ADR 0067). Milestone 4b presents those pages in an in-app Safari sheet so
+/// the client never leaves the app, and revalidates the affected documents
+/// when the sheet is dismissed (docs/IOS-UPGRADE.md item ④).
 struct ClientDocumentsView: View {
     let home: ResourceModel<ClientHomeSummary>
     let repository: ClientRepository
@@ -38,7 +40,9 @@ struct ClientDocumentsView: View {
             }
         case .singlePreview:
             if let document = summary.document {
-                SingleDocumentView(document: document)
+                SingleDocumentView(document: document) {
+                    await home.refreshAfterCurrent()
+                }
             } else {
                 ContentUnavailableView(
                     "Document unavailable",
@@ -56,6 +60,12 @@ struct ClientDocumentsView: View {
             }
         }
     }
+}
+
+/// Identifiable wrapper so a document action URL can drive `.sheet(item:)`.
+private struct DocumentWebAction: Identifiable {
+    let url: URL
+    var id: String { url.absoluteString }
 }
 
 private struct ProjectDocumentsList: View {
@@ -90,7 +100,9 @@ private struct ProjectDocumentsList: View {
         List {
             ForEach(documents.proposals) { proposal in
                 NavigationLink {
-                    ClientProposalDetailView(proposal: proposal)
+                    ClientProposalDetailView(proposal: proposal) {
+                        await model.refreshAfterCurrent()
+                    }
                 } label: {
                     DocumentRow(
                         icon: "sparkles",
@@ -103,7 +115,9 @@ private struct ProjectDocumentsList: View {
             }
             ForEach(documents.contracts) { contract in
                 NavigationLink {
-                    ClientContractDetailView(contract: contract)
+                    ClientContractDetailView(contract: contract) {
+                        await model.refreshAfterCurrent()
+                    }
                 } label: {
                     DocumentRow(
                         icon: "checkmark.seal",
@@ -119,7 +133,9 @@ private struct ProjectDocumentsList: View {
             }
             ForEach(documents.invoices) { invoice in
                 NavigationLink {
-                    ClientInvoiceDetailView(invoice: invoice)
+                    ClientInvoiceDetailView(invoice: invoice) {
+                        await model.refreshAfterCurrent()
+                    }
                 } label: {
                     DocumentRow(
                         icon: "creditcard",
@@ -167,7 +183,8 @@ private struct DocumentRow: View {
 
 private struct SingleDocumentView: View {
     let document: ClientDocumentPreview
-    @Environment(\.openURL) private var openURL
+    let refreshAfterWebAction: () async -> Void
+    @State private var webAction: DocumentWebAction?
 
     var body: some View {
         List {
@@ -194,7 +211,7 @@ private struct SingleDocumentView: View {
             }
             Section {
                 Button {
-                    openURL(document.publicURL)
+                    webAction = DocumentWebAction(url: document.publicURL)
                 } label: {
                     Label("Open and take action", systemImage: "safari")
                         .frame(maxWidth: .infinity, minHeight: 44)
@@ -203,9 +220,16 @@ private struct SingleDocumentView: View {
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
             } footer: {
-                Text("Reviewing and responding happens on the studio’s secure page.")
+                Text("Reviewing and responding happens on the studio’s secure page, without leaving the app.")
             }
         }
+        .sheet(item: $webAction, onDismiss: refreshAfterSheetDismissal) { action in
+            SafariView(url: action.url)
+        }
+    }
+
+    private func refreshAfterSheetDismissal() {
+        Task { await refreshAfterWebAction() }
     }
 }
 
@@ -252,15 +276,21 @@ struct ClientDocumentDetailLoader: View {
         if ref.variant == "proposal",
            let proposal = documents.proposals.first(where: { $0.id == ref.id })
         {
-            ClientProposalDetailView(proposal: proposal)
+            ClientProposalDetailView(proposal: proposal) {
+                await model?.refreshAfterCurrent()
+            }
         } else if ref.variant == "contract",
                   let contract = documents.contracts.first(where: { $0.id == ref.id })
         {
-            ClientContractDetailView(contract: contract)
+            ClientContractDetailView(contract: contract) {
+                await model?.refreshAfterCurrent()
+            }
         } else if ref.variant == "invoice",
                   let invoice = documents.invoices.first(where: { $0.id == ref.id })
         {
-            ClientInvoiceDetailView(invoice: invoice)
+            ClientInvoiceDetailView(invoice: invoice) {
+                await model?.refreshAfterCurrent()
+            }
         } else {
             notFound
         }
@@ -277,7 +307,8 @@ struct ClientDocumentDetailLoader: View {
 
 struct ClientProposalDetailView: View {
     let proposal: Proposal
-    @Environment(\.openURL) private var openURL
+    let refreshAfterWebAction: () async -> Void
+    @State private var webAction: DocumentWebAction?
 
     var body: some View {
         List {
@@ -314,7 +345,7 @@ struct ClientProposalDetailView: View {
                 Section {
                     if let url = proposal.publicURL {
                         Button {
-                            openURL(url)
+                            webAction = DocumentWebAction(url: url)
                         } label: {
                             Label("Review and respond", systemImage: "safari")
                                 .frame(maxWidth: .infinity, minHeight: 44)
@@ -324,7 +355,7 @@ struct ClientProposalDetailView: View {
                         .listRowBackground(Color.clear)
                     }
                 } footer: {
-                    Text("Accepting or declining happens on the studio’s secure page.")
+                    Text("Accepting or declining happens on the studio’s secure page, without leaving the app.")
                 }
             } else if proposal.status == .accepted {
                 acceptedStrip
@@ -332,6 +363,13 @@ struct ClientProposalDetailView: View {
         }
         .navigationTitle("Proposal")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $webAction, onDismiss: refreshAfterSheetDismissal) { action in
+            SafariView(url: action.url)
+        }
+    }
+
+    private func refreshAfterSheetDismissal() {
+        Task { await refreshAfterWebAction() }
     }
 
     private var acceptedStrip: some View {
@@ -349,7 +387,8 @@ struct ClientProposalDetailView: View {
 
 struct ClientContractDetailView: View {
     let contract: Contract
-    @Environment(\.openURL) private var openURL
+    let refreshAfterWebAction: () async -> Void
+    @State private var webAction: DocumentWebAction?
 
     var body: some View {
         List {
@@ -381,7 +420,7 @@ struct ClientContractDetailView: View {
             } else if contract.canSign, let url = contract.publicURL {
                 Section {
                     Button {
-                        openURL(url)
+                        webAction = DocumentWebAction(url: url)
                     } label: {
                         Label("Review and sign", systemImage: "safari")
                             .frame(maxWidth: .infinity, minHeight: 44)
@@ -390,12 +429,19 @@ struct ClientContractDetailView: View {
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
                 } footer: {
-                    Text("Signing happens on the studio’s secure page, exactly as it appears there.")
+                    Text("Signing happens on the studio’s secure page, exactly as it appears there — without leaving the app.")
                 }
             }
         }
         .navigationTitle("Agreement")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $webAction, onDismiss: refreshAfterSheetDismissal) { action in
+            SafariView(url: action.url)
+        }
+    }
+
+    private func refreshAfterSheetDismissal() {
+        Task { await refreshAfterWebAction() }
     }
 
     private var signedLabel: String {
@@ -412,7 +458,8 @@ struct ClientContractDetailView: View {
 
 struct ClientInvoiceDetailView: View {
     let invoice: Invoice
-    @Environment(\.openURL) private var openURL
+    let refreshAfterWebAction: () async -> Void
+    @State private var webAction: DocumentWebAction?
 
     var body: some View {
         List {
@@ -450,7 +497,7 @@ struct ClientInvoiceDetailView: View {
             } else if let url = invoice.publicURL {
                 Section {
                     Button {
-                        openURL(url)
+                        webAction = DocumentWebAction(url: url)
                     } label: {
                         Label(
                             "Pay \(invoice.balance.ownerDisplayValue)",
@@ -462,11 +509,18 @@ struct ClientInvoiceDetailView: View {
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
                 } footer: {
-                    Text("Payment is handled by the studio’s secure checkout.")
+                    Text("Payment is handled by the studio’s secure checkout, without leaving the app.")
                 }
             }
         }
         .navigationTitle("Invoice")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $webAction, onDismiss: refreshAfterSheetDismissal) { action in
+            SafariView(url: action.url)
+        }
+    }
+
+    private func refreshAfterSheetDismissal() {
+        Task { await refreshAfterWebAction() }
     }
 }

@@ -173,6 +173,11 @@ struct OwnerCompanionView: View {
                             // (ADR 0051); the app links out so a signed-in owner
                             // can always reach account deletion from inside it.
                             Section {
+                                NavigationLink {
+                                    OwnerDevicesView(repository: repository)
+                                } label: {
+                                    Label("Devices", systemImage: "iphone")
+                                }
                                 Link(destination: accountLinks.exportStudio) {
                                     Label("Export studio data", systemImage: "arrow.down.doc")
                                 }
