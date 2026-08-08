@@ -85,11 +85,13 @@ struct InquiriesView: View {
     }
 
     private func contactLine(_ inquiry: InquirySummary) -> String? {
-        let values = [inquiry.email, inquiry.phone]
-            .compactMap { value in
-                guard let value, !value.isEmpty else { return nil }
-                return value
-            }
+        var values: [String] = []
+        if let email = inquiry.email, !email.isEmpty {
+            values.append(email)
+        }
+        if let phone = inquiry.phone, !phone.isEmpty {
+            values.append(phone)
+        }
         return values.isEmpty ? nil : values.joined(separator: " · ")
     }
 
