@@ -198,6 +198,70 @@ struct RefreshTokenRequest: Codable, Hashable, Sendable {
     let refreshToken: String
 }
 
+/// Safe device metadata shown in the owner's session list
+/// (`GET /api/v1/auth/sessions`). Every field is optional on the wire.
+struct DeviceSummary: Codable, Hashable, Sendable {
+    let name: String?
+    let platform: String?
+    let appVersion: String?
+}
+
+/// One revocable owner session from `GET /api/v1/auth/sessions`. Decoding is
+/// forward-compatible: `isCurrent` defaults to false when an older server
+/// omits it, and unknown fields are ignored.
+struct SessionSummary: Codable, Hashable, Identifiable, Sendable {
+    let id: String
+    let device: DeviceSummary
+    let createdAt: Date
+    let lastSeenAt: Date?
+    let expiresAt: Date
+    let isCurrent: Bool
+    let revokedAt: Date?
+
+    init(
+        id: String,
+        device: DeviceSummary,
+        createdAt: Date,
+        lastSeenAt: Date? = nil,
+        expiresAt: Date,
+        isCurrent: Bool = false,
+        revokedAt: Date? = nil
+    ) {
+        self.id = id
+        self.device = device
+        self.createdAt = createdAt
+        self.lastSeenAt = lastSeenAt
+        self.expiresAt = expiresAt
+        self.isCurrent = isCurrent
+        self.revokedAt = revokedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        device = try container.decode(DeviceSummary.self, forKey: .device)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        lastSeenAt = try container.decodeIfPresent(Date.self, forKey: .lastSeenAt)
+        expiresAt = try container.decode(Date.self, forKey: .expiresAt)
+        isCurrent = try container.decodeIfPresent(Bool.self, forKey: .isCurrent) ?? false
+        revokedAt = try container.decodeIfPresent(Date.self, forKey: .revokedAt)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case device
+        case createdAt
+        case lastSeenAt
+        case expiresAt
+        case isCurrent
+        case revokedAt
+    }
+}
+
+struct SessionListResponse: Codable, Hashable, Sendable {
+    let sessions: [SessionSummary]
+}
+
 struct SharedAccessKind: APIStringValue {
     let rawValue: String
 

@@ -175,6 +175,32 @@ actor OwnerRepository {
         return value
     }
 
+    /// The signed-in session roster is network-first and session-memory-only,
+    /// like the task inbox: it changes on any login, logout, or expiry — on
+    /// this device or another — so a persisted snapshot could present an ended
+    /// session as still revocable.
+    func refreshDeviceSessions() async throws -> ResourceSnapshot<[SessionSummary]> {
+        let response = try await send(MiseEndpoints.Auth.sessions)
+        return ResourceSnapshot(
+            value: response.sessions,
+            storedAt: Date(),
+            source: .network
+        )
+    }
+
+    /// Revocation is idempotent from the owner's perspective: the server
+    /// answers 404 when the session already ended (expired, signed out, or
+    /// revoked elsewhere), and that outcome still means "gone", so it is
+    /// treated as success. Terminal authentication failures still purge local
+    /// state through `purgeIfSessionEnded` inside `send`.
+    func revokeDeviceSession(id: String) async throws {
+        do {
+            _ = try await send(MiseEndpoints.Auth.revokeSession(id: id))
+        } catch let APIError.server(status, _) where status == 404 {
+            return
+        }
+    }
+
     func cancelBooking(id: Int64) async throws -> Booking {
         let value = try await send(MiseEndpoints.Scheduling.cancelBooking(id: id))
         try? await cache.remove(Key.bookings)
