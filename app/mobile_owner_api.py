@@ -197,6 +197,34 @@ class ProjectSummary(OwnerAPIModel):
         return _ensure_utc(value)
 
 
+class InquiryStatus(StrEnum):
+    OPEN = "open"
+    CONVERTED = "converted"
+    DISMISSED = "dismissed"
+
+
+class InquirySummary(OwnerAPIModel):
+    id: int = Field(gt=0, le=_INT64_MAX)
+    name: str = Field(max_length=2000)
+    business: str | None = Field(default=None, max_length=2000)
+    email: str | None = Field(default=None, max_length=2000)
+    phone: str | None = Field(default=None, max_length=2000)
+    kind: str = Field(min_length=1, max_length=64)
+    service: str | None = Field(default=None, max_length=2000)
+    shoot_on: dt.date | None = None
+    message_preview: str = Field(max_length=280)
+    status: InquiryStatus
+    is_replied: bool
+    converted_client_id: int | None = Field(default=None, gt=0, le=_INT64_MAX)
+    converted_project_id: int | None = Field(default=None, gt=0, le=_INT64_MAX)
+    received_at: dt.datetime
+
+    @field_validator("received_at")
+    @classmethod
+    def received_at_is_utc(cls, value: dt.datetime) -> dt.datetime:
+        return _ensure_utc(value)
+
+
 class APIPage[T: BaseModel](OwnerAPIModel):
     items: list[T]
     next_cursor: str | None = None
@@ -617,6 +645,69 @@ def projects(
         items=[_project_summary(row) for row in visible],
         next_cursor=(
             _encode_cursor("projects", int(visible[-1]["id"])) if has_more and visible else None
+        ),
+        has_more=has_more,
+    )
+    return _conditional(request, response, payload)
+
+
+def _inquiry_summary(row) -> InquirySummary:
+    if row["converted_at"]:
+        status = InquiryStatus.CONVERTED
+    elif row["dismissed_at"]:
+        status = InquiryStatus.DISMISSED
+    else:
+        status = InquiryStatus.OPEN
+    # Whitespace-collapsed snippet, like the admin inbox thread preview.
+    preview = " ".join((row["message"] or "").split())
+    return InquirySummary(
+        id=int(row["id"]),
+        name=row["name"],
+        business=row["business"] or None,
+        email=row["email"] or None,
+        phone=row["phone"] or None,
+        kind=row["kind"],
+        service=row["service"],
+        shoot_on=_date_only(row["shoot_date"]),
+        message_preview=preview[:280],
+        status=status,
+        is_replied=bool(row["emailed"]),
+        converted_client_id=(
+            int(row["converted_client_id"]) if row["converted_client_id"] is not None else None
+        ),
+        converted_project_id=(
+            int(row["converted_project_id"]) if row["converted_project_id"] is not None else None
+        ),
+        received_at=_utc_timestamp(row["created_at"]),
+    )
+
+
+@router.get("/inquiries", response_model=APIPage[InquirySummary])
+def inquiries(
+    request: Request,
+    response: Response,
+    cursor: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=_MAX_PAGE_SIZE)] = _DEFAULT_PAGE_SIZE,
+) -> APIPage[InquirySummary] | Response:
+    last_id = _decode_cursor("inquiries", cursor)
+    where = "WHERE i.id < ?" if last_id is not None else ""
+    params = (last_id, limit + 1) if last_id is not None else (limit + 1,)
+    rows = db.all_(
+        f"""SELECT i.id, i.name, i.email, i.business, i.message, i.phone, i.kind,
+                   i.service, i.shoot_date, i.emailed, i.created_at,
+                   i.converted_at, i.dismissed_at,
+                   i.converted_client_id, i.converted_project_id
+              FROM inquiries i
+              {where}
+              ORDER BY i.id DESC LIMIT ?""",
+        params,
+    )
+    has_more = len(rows) > limit
+    visible = rows[:limit]
+    payload = APIPage[InquirySummary](
+        items=[_inquiry_summary(row) for row in visible],
+        next_cursor=(
+            _encode_cursor("inquiries", int(visible[-1]["id"])) if has_more and visible else None
         ),
         has_more=has_more,
     )
