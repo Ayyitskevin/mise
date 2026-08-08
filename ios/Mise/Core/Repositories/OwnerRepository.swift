@@ -512,12 +512,14 @@ actor OwnerRepository {
         etag: String? = nil,
         storedAt: Date = Date()
     ) async throws -> ResourceSnapshot<Value> {
+        try await requireActiveCache()
         let record = try await cache.write(
             value,
             key: key,
             etag: etag,
             storedAt: storedAt
         )
+        try await requireActiveCache()
         return ResourceSnapshot(
             value: record.value,
             storedAt: record.storedAt,

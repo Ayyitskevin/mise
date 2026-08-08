@@ -651,6 +651,21 @@ def projects(
     return _conditional(request, response, payload)
 
 
+def _inquiry_text(value: object, *, maximum: int, fallback: str | None = None) -> str | None:
+    cleaned = str(value or "").strip()
+    return cleaned[:maximum] or fallback
+
+
+def _inquiry_date(value: object) -> dt.date | None:
+    raw = str(value or "").strip()
+    if len(raw) != 10:
+        return None
+    try:
+        return dt.date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
 def _inquiry_summary(row) -> InquirySummary:
     if row["converted_at"]:
         status = InquiryStatus.CONVERTED
@@ -658,20 +673,22 @@ def _inquiry_summary(row) -> InquirySummary:
         status = InquiryStatus.DISMISSED
     else:
         status = InquiryStatus.OPEN
-    # Whitespace-collapsed snippet, like the admin inbox thread preview.
-    preview = " ".join((row["message"] or "").split())
+    # Bound work before collapsing whitespace: inquiry fields predate the mobile
+    # contract and historical/public rows are not guaranteed to fit its DTO.
+    preview_source = str(row["message"] or "")[:4096]
+    preview = " ".join(preview_source.split())[:280]
     return InquirySummary(
         id=int(row["id"]),
-        name=row["name"],
-        business=row["business"] or None,
-        email=row["email"] or None,
-        phone=row["phone"] or None,
-        kind=row["kind"],
-        service=row["service"],
-        shoot_on=_date_only(row["shoot_date"]),
-        message_preview=preview[:280],
+        name=_inquiry_text(row["name"], maximum=2000, fallback=""),
+        business=_inquiry_text(row["business"], maximum=2000),
+        email=_inquiry_text(row["email"], maximum=2000),
+        phone=_inquiry_text(row["phone"], maximum=2000),
+        kind=_inquiry_text(row["kind"], maximum=64, fallback="unknown"),
+        service=_inquiry_text(row["service"], maximum=2000),
+        shoot_on=_inquiry_date(row["shoot_date"]),
+        message_preview=preview,
         status=status,
-        is_replied=bool(row["emailed"]),
+        is_replied=bool(row["is_replied"]),
         converted_client_id=(
             int(row["converted_client_id"]) if row["converted_client_id"] is not None else None
         ),
@@ -694,9 +711,13 @@ def inquiries(
     params = (last_id, limit + 1) if last_id is not None else (limit + 1,)
     rows = db.all_(
         f"""SELECT i.id, i.name, i.email, i.business, i.message, i.phone, i.kind,
-                   i.service, i.shoot_date, i.emailed, i.created_at,
+                   i.service, i.shoot_date, i.created_at,
                    i.converted_at, i.dismissed_at,
-                   i.converted_client_id, i.converted_project_id
+                   i.converted_client_id, i.converted_project_id,
+                   EXISTS (
+                       SELECT 1 FROM messages m
+                        WHERE m.inquiry_id=i.id AND m.direction='out'
+                   ) AS is_replied
               FROM inquiries i
               {where}
               ORDER BY i.id DESC LIMIT ?""",

@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct InquiriesView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let model: ResourceModel<[InquirySummary]>
     @State private var query = ""
 
@@ -13,7 +14,7 @@ struct InquiriesView: View {
                 ContentUnavailableView(
                     "No inquiries",
                     systemImage: "tray",
-                    description: Text("New inquiries from your contact form will appear here.")
+                    description: Text("New inquiries and messages will appear here.")
                 )
             }
         )
@@ -41,6 +42,9 @@ struct InquiriesView: View {
                         if let business = inquiry.business, !business.isEmpty {
                             Text(business).foregroundStyle(.secondary)
                         }
+                        if let contact = contactLine(inquiry) {
+                            Text(contact).foregroundStyle(.secondary)
+                        }
                         Text(topicLine(inquiry))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
@@ -48,7 +52,7 @@ struct InquiriesView: View {
                             Text(inquiry.messagePreview)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(2)
+                                .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                         }
                         HStack(spacing: 12) {
                             Text(inquiry.receivedAt, style: .relative)
@@ -80,10 +84,26 @@ struct InquiriesView: View {
         return display
     }
 
+    private func contactLine(_ inquiry: InquirySummary) -> String? {
+        let values = [inquiry.email, inquiry.phone]
+            .compactMap { value in
+                guard let value, !value.isEmpty else { return nil }
+                return value
+            }
+        return values.isEmpty ? nil : values.joined(separator: " · ")
+    }
+
     private func matchesQuery(_ inquiry: InquirySummary) -> Bool {
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty else { return true }
-        return [inquiry.name, inquiry.business, inquiry.email, inquiry.service, inquiry.kind]
+        return [
+            inquiry.name,
+            inquiry.business,
+            inquiry.email,
+            inquiry.phone,
+            inquiry.service,
+            inquiry.kind,
+        ]
             .compactMap { $0 }
             .contains { $0.localizedCaseInsensitiveContains(term) }
     }

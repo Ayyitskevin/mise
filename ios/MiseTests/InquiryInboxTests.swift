@@ -107,6 +107,7 @@ final class InquiryInboxTests: XCTestCase {
 
         let snapshot = try await repository.refreshInquiries()
         let cached = try await repository.cachedInquiries()
+        let rawCached = try await cache.read("inquiries.v1", as: [InquirySummary].self)
         let requests = await client.capturedRequests()
 
         XCTAssertEqual(snapshot.source, .network)
@@ -114,9 +115,7 @@ final class InquiryInboxTests: XCTestCase {
         XCTAssertEqual(snapshot.value.map(\.status), [.open, .dismissed])
         XCTAssertEqual(cached?.source, .cache)
         XCTAssertEqual(cached?.value, snapshot.value)
-        XCTAssertNotNil(
-            try await cache.read("inquiries.v1", as: [InquirySummary].self)
-        )
+        XCTAssertNotNil(rawCached)
         XCTAssertEqual(requests.map(\.method), [.get, .get])
         XCTAssertEqual(requests.map(\.path), ["/api/v1/inquiries", "/api/v1/inquiries"])
         XCTAssertEqual(
@@ -157,7 +156,41 @@ final class InquiryInboxTests: XCTestCase {
             // Expected; a cycling cursor must not loop forever.
         }
 
-        XCTAssertNil(try await repository.cachedInquiries())
+        let cached = try await repository.cachedInquiries()
+        XCTAssertNil(cached)
+    }
+
+    func testRefreshInquiriesCannotRecreateCacheAfterPurge() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("inquiry-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = TenantJSONCache(cacheNamespace: "workspace_test", rootDirectory: root)
+        let client = SuspendedInquiryClient(reply: Data(
+            """
+            {
+              "items": [\(Self.openInquiryJSON)],
+              "next_cursor": null, "has_more": false
+            }
+            """.utf8
+        ))
+        let repository = OwnerRepository(client: client, cache: cache)
+        let refresh = Task { try await repository.refreshInquiries() }
+
+        await client.waitUntilRequested()
+        await repository.purgeCache()
+        await client.release()
+
+        do {
+            _ = try await refresh.value
+            XCTFail("Expected a response completing after purge to be rejected.")
+        } catch OwnerRepositoryError.inactiveSession {
+            // Expected; signed-out repositories cannot recreate private snapshots.
+        }
+
+        let rawCached = try await cache.read("inquiries.v1", as: [InquirySummary].self)
+        let cached = try await repository.cachedInquiries()
+        XCTAssertNil(rawCached)
+        XCTAssertNil(cached)
     }
 
     private static func date(_ value: String) throws -> Date {
@@ -207,6 +240,43 @@ private struct CapturedInquiryRequest: Sendable {
     let method: HTTPMethod
     let path: String
     let queryItems: [APIQueryItem]
+}
+
+private actor SuspendedInquiryClient: APIClientProtocol {
+    private let reply: Data
+    private var requested = false
+    private var released = false
+
+    init(reply: Data) { self.reply = reply }
+
+    func send<Response: Decodable & Sendable>(
+        _ endpoint: APIEndpoint<Response>
+    ) async throws -> Response {
+        try await sendWithMetadata(endpoint).value
+    }
+
+    func sendWithMetadata<Response: Decodable & Sendable>(
+        _ endpoint: APIEndpoint<Response>
+    ) async throws -> APIResponse<Response> {
+        requested = true
+        while !released {
+            await Task.yield()
+        }
+        return APIResponse(
+            value: try MiseJSON.decoder().decode(Response.self, from: reply),
+            metadata: APIResponseMetadata(etag: nil, lastModified: nil, receivedAt: Date())
+        )
+    }
+
+    func waitUntilRequested() async {
+        while !requested {
+            await Task.yield()
+        }
+    }
+
+    func release() {
+        released = true
+    }
 }
 
 private actor QueuedInquiryClient: APIClientProtocol {

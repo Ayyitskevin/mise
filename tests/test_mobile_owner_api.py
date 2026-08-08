@@ -548,7 +548,20 @@ def test_inquiries_maps_storage_fields_and_triage_state(owner):
         service="Wedding",
         shoot_date="2026-09-12",
     )
-    sms_id = _insert_inquiry("+15551234567", kind="sms", phone="+15551234567", emailed=True)
+    db.run(
+        "INSERT INTO messages (inquiry_id,direction,channel,body) VALUES (?,'in','sms',?)",
+        (open_id, "An inbound message is not a studio reply."),
+    )
+    notified_id = _insert_inquiry(
+        "Notification Only",
+        email="notified@example.test",
+        emailed=True,
+    )
+    sms_id = _insert_inquiry("+15551234567", kind="sms", phone="+15551234567")
+    db.run(
+        "INSERT INTO messages (inquiry_id,direction,channel,body) VALUES (?,'out','sms',?)",
+        (sms_id, "Thanks — we will follow up."),
+    )
     converted_id = _insert_inquiry(
         "Converted Lead",
         email="converted@example.test",
@@ -569,6 +582,7 @@ def test_inquiries_maps_storage_fields_and_triage_state(owner):
         dismissed_id,
         converted_id,
         sms_id,
+        notified_id,
         open_id,
     ]
     by_id = {item["id"]: item for item in body["items"]}
@@ -592,6 +606,7 @@ def test_inquiries_maps_storage_fields_and_triage_state(owner):
     assert sms_item["email"] is None  # empty string normalized away
     assert sms_item["phone"] == "+15551234567"
     assert sms_item["is_replied"] is True
+    assert by_id[notified_id]["is_replied"] is False
 
     converted_item = by_id[converted_id]
     assert converted_item["status"] == "converted"
@@ -609,6 +624,47 @@ def test_inquiries_maps_storage_fields_and_triage_state(owner):
         "/api/v1/inquiries", headers={**headers, "If-None-Match": response.headers["etag"]}
     )
     assert cached.status_code == 304
+
+    db.run(
+        "INSERT INTO messages (inquiry_id,direction,channel,body) VALUES (?,'out','email',?)",
+        (open_id, "Reply sent from the inbox."),
+    )
+    refreshed = client.get(
+        "/api/v1/inquiries", headers={**headers, "If-None-Match": response.headers["etag"]}
+    )
+    assert refreshed.status_code == 200
+    assert refreshed.headers["etag"] != response.headers["etag"]
+    refreshed_open = next(item for item in refreshed.json()["items"] if item["id"] == open_id)
+    assert refreshed_open["is_replied"] is True
+
+
+def test_inquiries_bounds_untrusted_legacy_fields_and_malformed_dates(owner):
+    client, headers, _ = owner
+    inquiry_id = _insert_inquiry(
+        f"  {'N' * 2500}  ",
+        email="   ",
+        business=f"  {'B' * 2500}  ",
+        message=("word \n\t" * 2000),
+        kind="   ",
+        phone=f"  {'1' * 2500}  ",
+        service=f"  {'S' * 2500}  ",
+        shoot_date="not-a-date",
+    )
+
+    response = client.get("/api/v1/inquiries", headers=headers)
+
+    assert response.status_code == 200
+    item = next(value for value in response.json()["items"] if value["id"] == inquiry_id)
+    assert len(item["name"]) == 2000
+    assert len(item["business"]) == 2000
+    assert item["email"] is None
+    assert len(item["phone"]) == 2000
+    assert item["kind"] == "unknown"
+    assert len(item["service"]) == 2000
+    assert item["shoot_on"] is None
+    assert len(item["message_preview"]) == 280
+    assert "\n" not in item["message_preview"]
+    assert "\t" not in item["message_preview"]
 
 
 def test_inquiries_cursor_pages_and_rejects_bad_cursors(owner):
