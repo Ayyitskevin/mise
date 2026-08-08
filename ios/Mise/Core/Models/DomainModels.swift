@@ -177,6 +177,32 @@ struct ProjectSummary: Codable, Hashable, Sendable, Identifiable {
     let createdAt: Date
 }
 
+struct InquiryStatus: APIStringValue {
+    let rawValue: String
+    init(rawValue: String) { self.rawValue = rawValue }
+
+    static let open = Self(rawValue: "open")
+    static let converted = Self(rawValue: "converted")
+    static let dismissed = Self(rawValue: "dismissed")
+}
+
+struct InquirySummary: Codable, Hashable, Sendable, Identifiable {
+    let id: Int64
+    let name: String
+    let business: String?
+    let email: String?
+    let phone: String?
+    let kind: String
+    let service: String?
+    let shootOn: LocalDate?
+    let messagePreview: String
+    let status: InquiryStatus
+    let isReplied: Bool
+    let convertedClientID: Int64?
+    let convertedProjectID: Int64?
+    let receivedAt: Date
+}
+
 struct GalleryDeliveryState: APIStringValue {
     let rawValue: String
     init(rawValue: String) { self.rawValue = rawValue }

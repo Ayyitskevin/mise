@@ -2,6 +2,7 @@ import SwiftUI
 
 enum OwnerDestination: String, CaseIterable, Identifiable {
     case home
+    case inquiries
     case clients
     case projects
     case galleries
@@ -14,6 +15,7 @@ enum OwnerDestination: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .home: "house"
+        case .inquiries: "tray"
         case .clients: "person.2"
         case .projects: "briefcase"
         case .galleries: "photo.on.rectangle"
@@ -28,6 +30,7 @@ struct OwnerCompanionView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selection = OwnerDestination.home
     @State private var home: ResourceModel<DashboardSummary>
+    @State private var inquiries: ResourceModel<[InquirySummary]>
     @State private var clients: ResourceModel<[ClientSummary]>
     @State private var projects: ResourceModel<[ProjectSummary]>
     @State private var galleries: ResourceModel<[GallerySummary]>
@@ -80,6 +83,11 @@ struct OwnerCompanionView: View {
             remote: { try await repository.refreshDashboard() }
         )
         _home = State(initialValue: homeModel)
+        _inquiries = State(initialValue: ResourceModel(
+            staleAfter: 15 * 60,
+            cached: { try await repository.cachedInquiries() },
+            remote: { try await repository.refreshInquiries() }
+        ))
         _clients = State(initialValue: ResourceModel(
             staleAfter: 60 * 60,
             cached: { try await repository.cachedClients() },
@@ -204,6 +212,8 @@ struct OwnerCompanionView: View {
                 commands: commands,
                 taskCoordinator: taskCoordinator
             ) { selection = $0 }
+        case .inquiries:
+            InquiriesView(model: inquiries)
         case .clients:
             ClientsView(model: clients)
         case .projects:

@@ -111,6 +111,16 @@ extension ProposalStatus {
     }
 }
 
+extension InquiryStatus {
+    var tone: StatusTone {
+        switch self {
+        case .open: .honey
+        case .converted: .ok
+        default: .neutral
+        }
+    }
+}
+
 extension ContractStatus {
     var tone: StatusTone {
         switch self {
