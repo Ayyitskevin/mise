@@ -39,9 +39,44 @@ def _probe(cwd: Path, extra_env: dict | None = None) -> str:
     return out.stdout.strip()
 
 
+# The CWD fallback is deliberately gated on the bare-metal default being absent
+# (see app/config.py), so this test's premise — "a fresh clone on a machine with
+# no bare-metal deployment" — is false on a host that actually runs one. On such
+# a host the fallback correctly does not fire, and asserting that it does made
+# the test fail for the environment rather than for the code.
+BARE_METAL_ENV_FILE = Path("/opt/mise/.env")
+
+
+@pytest.mark.skipif(
+    BARE_METAL_ENV_FILE.is_file(),
+    reason=(
+        f"{BARE_METAL_ENV_FILE} exists on this host, so config loads it instead of "
+        "./.env by design; the fresh-clone fallback cannot be exercised here"
+    ),
+)
 def test_fresh_clone_dot_env_in_cwd_is_loaded(tmp_path):
     (tmp_path / ".env").write_text("MISE_SECRET_KEY=from-cwd-dot-env\n")
     assert _probe(tmp_path) == "from-cwd-dot-env"
+
+
+def test_cwd_fallback_is_gated_on_the_bare_metal_default(tmp_path):
+    """The gating rule itself, asserted on every host including deployment ones.
+
+    Pins the two halves the skip above cannot cover everywhere: an explicit
+    MISE_ENV_FILE suppresses the CWD fallback, and a bare-metal default that
+    does exist is preferred over ./.env.
+    """
+
+    (tmp_path / ".env").write_text("MISE_SECRET_KEY=stray-cwd-value\n")
+    explicit = tmp_path / "explicit.env"
+    explicit.write_text("MISE_SECRET_KEY=from-explicit-file\n")
+
+    # Explicit file wins and the stray ./.env is not mixed in.
+    assert _probe(tmp_path, {"MISE_ENV_FILE": str(explicit)}) == "from-explicit-file"
+
+    # An explicit path that does not exist still suppresses the CWD fallback,
+    # so an operator never silently inherits a stray ./.env.
+    assert _probe(tmp_path, {"MISE_ENV_FILE": str(tmp_path / "absent.env")}) == "<unset>"
 
 
 def test_explicit_env_file_still_wins_over_cwd(tmp_path):
